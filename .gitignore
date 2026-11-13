@@ -36,6 +36,7 @@ tmp/
 
 # Editor / IDE
 .idea/
+.openidea/
 .vscode/
 *.swp
 *.swo

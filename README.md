@@ -82,7 +82,7 @@ GAO operates as a closed 4-step loop:
 Send this repository link to your Grok Bot and ask it to configure itself following [AGENTS.md](AGENTS.md):
 
 ```text
-Please read AGENTS.md at https://github.com/Chasen-Liao/grokbot-and-omp and set up GAO for me.
+Please read AGENTS.md at https://github.com/yuehen7/grokbot-and-omp and set up GAO for me.
 ```
 
 The Bot will verify Node.js (>= 22), install or check OMP, help configure your model source and Webhook routine, register skills, and run a smoke test.
@@ -99,7 +99,7 @@ omp --version
 omp -p 'Reply with only OK' --no-session
 
 # 2. Clone this repository and run the safe installer (installs to ~/tools/omp-call)
-git clone https://github.com/Chasen-Liao/grokbot-and-omp /tmp/grokbot-and-omp
+git clone https://github.com/yuehen7/grokbot-and-omp /tmp/grokbot-and-omp
 cd /tmp/grokbot-and-omp
 ./install.sh
 
@@ -242,6 +242,12 @@ GAO and [GAP](https://github.com/Chasen-Liao/grokbot-and-pi) can coexist:
 | Notify env | `<BOT>_PI_NOTIFY_*` | `<BOT>_OMP_NOTIFY_*` |
 
 Skills should state explicitly whether the current dispatch target is Pi or OMP to avoid mixing commands.
+
+---
+
+## Reference & Acknowledgements
+
+GAO is directly modeled on **[GAP — Grokbot And Pi](https://github.com/Chasen-Liao/grokbot-and-pi)**. Its task lifecycle, owner routing, Webhook notification contract, `pi-guard` rule set, approval workflow, and Bot behavior specification are the blueprint for this project. Sincere thanks to the GAP author and contributors — GAO would not exist without their work.
 
 ---
 

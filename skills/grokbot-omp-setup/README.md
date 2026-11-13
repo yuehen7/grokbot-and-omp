@@ -6,7 +6,7 @@
 
 **安装**
 ```bash
-npx skills add Chasen-Liao/grokbot-and-omp --skill grokbot-omp-setup --global --yes
+npx skills add yuehen7/grokbot-and-omp --skill grokbot-omp-setup --global --yes
 ```
 
 **触发**：对 Bot 说「帮我配好 OMP 派活」「按 grokbot-omp-setup 装一下」。

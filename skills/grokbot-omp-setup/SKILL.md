@@ -62,7 +62,7 @@ description: 第一次让 Grok Bot 把执行活派给电脑上的 OMP 之前用�
 克隆本仓库并运行安装脚本（会检查 Node >= 22 与 omp，复制到 `~/tools/omp-call`）：
 
 ```bash
-git clone https://github.com/Chasen-Liao/grokbot-and-omp /tmp/grokbot-and-omp
+git clone https://github.com/yuehen7/grokbot-and-omp /tmp/grokbot-and-omp
 cd /tmp/grokbot-and-omp && ./install.sh
 ```
 

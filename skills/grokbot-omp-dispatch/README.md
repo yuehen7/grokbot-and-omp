@@ -8,7 +8,7 @@ Grok Bot 的通用派活方法：**Bot 写任务书 → `omp-task` 后台派给 
 
 **安装**
 ```bash
-npx skills add Chasen-Liao/grokbot-and-omp --skill grokbot-omp-dispatch --global --yes
+npx skills add yuehen7/grokbot-and-omp --skill grokbot-omp-dispatch --global --yes
 ```
 
 **触发**：Bot 遇到超过两三步的执行活时自动读；也可以说「派给 OMP」「让 OMP 来做」「按 grokbot-omp-dispatch 派活」。

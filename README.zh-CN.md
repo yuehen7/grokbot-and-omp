@@ -82,7 +82,7 @@ GAO 包含清晰的 4 步闭环：
 只需把本仓库链接发给你的 Grok Bot，让它按 [AGENTS.md](AGENTS.md) 自动化配置：
 
 ```text
-请阅读 https://github.com/Chasen-Liao/grokbot-and-omp 的 AGENTS.md，帮我把 GAO 配置好。
+请阅读 https://github.com/yuehen7/grokbot-and-omp 的 AGENTS.md，帮我把 GAO 配置好。
 ```
 
 Bot 会依序检查 Node.js（>= 22）、检查或安装 OMP、运行安装脚本、协助配置模型额度与 Webhook 唤醒 Routine、录入技能并完成冒烟测试。
@@ -99,7 +99,7 @@ omp --version
 omp -p 'Reply with only OK' --no-session
 
 # 2. 克隆本仓库并执行安全安装脚本（默认安装到 ~/tools/omp-call）
-git clone https://github.com/Chasen-Liao/grokbot-and-omp /tmp/grokbot-and-omp
+git clone https://github.com/yuehen7/grokbot-and-omp /tmp/grokbot-and-omp
 cd /tmp/grokbot-and-omp
 ./install.sh
 
@@ -242,6 +242,12 @@ GAO 与 [GAP](https://github.com/Chasen-Liao/grokbot-and-pi) 可以同时安装�
 | 通知 env | `<BOT>_PI_NOTIFY_*` | `<BOT>_OMP_NOTIFY_*` |
 
 Skill 中需明确当前派活目标是 Pi 还是 OMP，避免混用命令。
+
+---
+
+## 引用参考与致谢
+
+GAO 直接参考并对照 **[GAP — Grokbot And Pi](https://github.com/Chasen-Liao/grokbot-and-pi)** 实现。其任务生命周期、owner 路由、Webhook 通知契约、`pi-guard` 规则集、审批闭环与 Bot 行为规范是本项目的蓝本。诚挚感谢 GAP 作者与贡献者——没有他们的工作就没有 GAO。
 
 ---
 

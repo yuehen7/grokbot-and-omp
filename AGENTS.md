@@ -62,7 +62,7 @@ omp -p 'Reply with only OK' --no-session --model <provider/model>
 
 ### Agent 执行
 ```bash
-git clone https://github.com/Chasen-Liao/grokbot-and-omp /tmp/grokbot-and-omp
+git clone https://github.com/yuehen7/grokbot-and-omp /tmp/grokbot-and-omp
 cd /tmp/grokbot-and-omp
 ./install.sh
 ```
