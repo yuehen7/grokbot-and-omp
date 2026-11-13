@@ -169,9 +169,12 @@ Example status:
 ```
 
 `session_file` and `omp_session_id` are filled from the OMP `get_state` RPC
-response after the first spawn. `reply` resumes that exact session file with
-`--resume`. If the file is gone, a new session is started and a
-`session_missing` event is recorded.
+response after the first spawn. `reply` / `approve` / `deny` resume with
+`--resume`, preferring an existing `session_file` and falling back to
+`omp_session_id` (OMP accepts a path or id/prefix). If the file is gone a
+`session_missing` event is recorded; if neither target is usable the command
+**fails hard** instead of silently starting a cold session that would lose
+context.
 
 Reply reuses options from the first run. Storage timestamps are ISO UTC;
 displayed timestamps and ID generation use the host process's local timezone.
@@ -202,8 +205,8 @@ restart.
 not finished after 12 seconds, `cancel` sends SIGKILL and records forced
 cancellation.
 
-Only one running task is allowed per session. `run` with an occupied session
-and `reply` to a running task are refused with exit code 1.
+Only one `running` or `queued` task is allowed per session. `run` with an
+occupied session and `reply` to a running task are refused with exit code 1.
 
 ## OMP RPC adaptation
 
@@ -214,9 +217,9 @@ The task runner speaks OMP's native RPC mode. The relevant contract:
 | Start | `spawn(OMP_BIN \|\| "omp", ["--mode","rpc", ...])`, cwd = task cwd |
 | Ready | Waits for the first `{"type":"ready",...}` frame |
 | Protocol | Sends `negotiate_protocol` v2 when advertised; reassembles `rpc_chunk` frames; falls back to v1 |
-| Session | Fresh run uses `--session-dir $OMP_TASK_SESSION_DIR`; reply uses `--resume <session_file>` |
+| Session | Fresh run uses `--session-dir $OMP_TASK_SESSION_DIR`; follow-ups use `--resume <session_file\|omp_session_id>` |
 | Prompt | `{"id","type":"prompt","message":"..."}` |
-| Completion | `prompt_result` keyed by prompt id; `agent_end` with `isTerminal !== false` is a watchdog fallback |
+| Completion | `prompt_result` keyed by prompt id; `agentInvoked:false` finishes local/slash turns; `agent_end` with `isTerminal !== false` is a watchdog; agent turns require assistant text (or fail) |
 | Abort | `{"type":"abort"}`; waits up to 5s for the outcome |
 | Resume | `reply`/`approve`/`deny` send a new prompt in the same resumed session |
 | UI requests | `select`/`confirm`/`input`/`editor`/`ask` are answered `extension_ui_response {cancelled:true}`; one-way `setWidget`/`notify` frames are ignored |

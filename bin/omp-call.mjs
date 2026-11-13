@@ -122,6 +122,8 @@ let exitCode = 1;
 let startedPrompt = false;
 let promptResult = null;
 let settleTimer = null;
+let localPrompt = false;
+let localTimer = null;
 
 function finish(code) {
   if (done) return;
@@ -129,6 +131,7 @@ function finish(code) {
   exitCode = code;
   clearTimeout(timer);
   clearTimeout(settleTimer);
+  clearTimeout(localTimer);
   try {
     child.stdin.end();
   } catch {}
@@ -215,8 +218,23 @@ function maybeFinish() {
     return;
   }
   if (promptResult?.status === "completed") {
-    finish(lastError && !lastText ? 1 : 0);
+    if (localPrompt) {
+      finish(lastError && !lastText ? 1 : 0);
+      return;
+    }
+    // Match omp-task / GAP: require assistant text for a successful agent turn.
+    if (lastError && !lastText) finish(1);
+    else if (!lastText) {
+      lastError ||= "no assistant text";
+      finish(1);
+    } else finish(0);
   }
+}
+
+function finishLocalPrompt() {
+  if (done) return;
+  if (lastError && !lastText) finish(1);
+  else finish(0);
 }
 
 let buf = Buffer.alloc(0);
@@ -269,12 +287,36 @@ child.stdout.on("data", (chunk) => {
         sendPrompt();
         continue;
       }
-      if (r.id === "p1" && r.command === "prompt" && !r.success) {
-        lastError = r.error || "prompt rejected";
-        finish(1);
+      if (r.id === "p1" && r.command === "prompt") {
+        if (!r.success) {
+          lastError = r.error || "prompt rejected";
+          finish(1);
+        } else if (r.data?.agentInvoked === false) {
+          // Local/slash: no prompt_result usually follows; brief grace for output.
+          localPrompt = true;
+          if (!localTimer) {
+            localTimer = setTimeout(() => {
+              if (done || promptResult) return;
+              finishLocalPrompt();
+            }, 500);
+            localTimer.unref?.();
+          }
+        }
         continue;
       }
       if (!r.success && r.error) lastError = `${r.command || "command"}: ${r.error}`;
+      continue;
+    }
+    if (r.type === "command_output") {
+      const t =
+        typeof r.text === "string"
+          ? r.text
+          : typeof r.output === "string"
+            ? r.output
+            : typeof r.content === "string"
+              ? r.content
+              : "";
+      if (t.trim()) lastText = t.trim();
       continue;
     }
     if (r.type === "message_end" && r.message?.role === "assistant") {
@@ -310,8 +352,12 @@ child.stdout.on("data", (chunk) => {
     if (r.type === "agent_end" && r.isTerminal !== false && !promptResult) {
       setTimeout(() => {
         if (done || promptResult) return;
-        maybeFinish();
-        if (!done) finish(lastText ? 0 : 1);
+        if (localPrompt) finishLocalPrompt();
+        else if (lastError && !lastText) finish(1);
+        else if (!lastText) {
+          lastError ||= "no assistant text";
+          finish(1);
+        } else finish(0);
       }, 2500).unref();
     }
   }

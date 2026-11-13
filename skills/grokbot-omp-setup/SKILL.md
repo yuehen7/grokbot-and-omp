@@ -76,12 +76,18 @@ OMP_NOTIFY_OFF=1 ~/tools/omp-call/omp-task run /tmp 'Reply with only OK' --sessi
 ```
 
 然后配唤醒：
-1. Bot 自己建一个 webhook 触发的例行任务，例如「OMP 完成唤醒」。内容参见仓库里的 `routines/omp-task-notify.md`：醒来先跑 `omp-task pending --owner <ID>`，按 grokbot-omp-dispatch 第 4 步核验、回报、ack；别的 Bot 的任务不碰。
+1. Bot 自己建一个 webhook 触发的例行任务，例如「OMP 完成唤醒」。内容参见仓库里的 `routines/omp-task-notify.md`：醒来先跑 `omp-task pending --owner <ID>`，按 grokbot-omp-dispatch **第 5 步**核验、回报、ack；别的 Bot 的任务不碰。
 2. 让用户用密钥输入卡，把 webhook 地址和 key 存成环境变量 `<BOT>_OMP_NOTIFY_URL`、`<BOT>_OMP_NOTIFY_KEY`（不要贴进聊天或文件）。多个 Bot 各用各的变量名前缀。派活时只需加 `--notify-prefix <BOT>`，`omp-task` 会自动读取对应通知配置并完成回调，无需手动映射环境变量。
 
 ## 4. 端到端验收
 
-派一个最小任务（比如「在 /tmp/gao-test.txt 写一行 hello」），按 grokbot-omp-dispatch 的命令后台跑，不要结束当前轮，用长时间阻塞等待跑完立刻验收（Webhook 唤醒作为兜底）。确认：`omp-task pending` 里有它、文件内容正确，ack 后 pending 变空。
+派一个最小任务（与 `AGENTS.md` 步骤 7 对齐）：
+```bash
+~/tools/omp-call/omp-task run /tmp \
+  "在 /tmp/gao-smoke.txt 中写入 gao-ok 并自查结束" \
+  --session smoke-gao --owner <ID> --notify-prefix <BOT>
+```
+按 grokbot-omp-dispatch 后台跑，不要结束当前轮，用长时间阻塞等待跑完立刻验收（Webhook 唤醒作为兜底）。确认：`omp-task pending` 里有它、`cat /tmp/gao-smoke.txt` 内容为 `gao-ok`，ack 后 pending 变空。
 
 ## 风险，要跟用户说清楚
 

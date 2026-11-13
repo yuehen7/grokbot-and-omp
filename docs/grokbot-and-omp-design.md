@@ -1,7 +1,7 @@
 # GAO — Grokbot And Omp 详细设计文档
 
-> 版本：v1.0  
-> 状态：设计定稿（待实现）  
+> 版本：v1.1  
+> 状态：已实现（与仓库代码同步；修订见文末）  
 > 蓝本：[`grokbot-and-pi`](../grokbot-and-pi/)（GAP）  
 > 目标：在 Grok Bot 中用 **OMP**（[omp.sh](https://omp.sh)，Oh My Pi / 终端优先 coding agent）完整替换 Pi，实现与 GAP **功能完全对标** 的派活、追踪、验收、安全与韧性闭环。
 
@@ -45,7 +45,7 @@ Grok Bot 平台对话额度昂贵，适合做意图理解、任务拆解与代�
 | F3 | `pi-guard` 灾难命令拦截 | `omp-guard`（OMP extension，`tool_call`） | 同规则集 + 单测覆盖 |
 | F4 | `pi-call.mjs` 单次 RPC | `omp-call.mjs` | 一发一收打印最终回复 |
 | F5 | `pi-run` 同步快捷包装 | `omp-run` | 冒烟可跑通 |
-| F6 | `pi-preflight` 模型通路预检 | `omp-preflight` | run/reply/approve 前自动执行 |
+| F6 | `pi-preflight` 模型通路预检 | `omp-preflight` | run/reply/approve/deny 前自动执行 |
 | F7 | Owner 路由 + pending/ack 过滤 | 完全同语义 | 多 Bot 不串台 |
 | F8 | 磁盘任务仓 `~/.pi/tasks/<ID>/` | `~/.omp/tasks/<ID>/` | 同文件集：status/events/result/prompts/approvals |
 | F9 | Webhook 元数据通知 | `source: "omp-task"` | 不含 prompt/result/密钥 |
@@ -263,15 +263,17 @@ Payload（完成）：
 
 若存在可执行的 `omp-preflight`（旁路同目录或 `OMP_TASK_PREFLIGHT`）：
 
-- 在 `run` / `reply` / `approve` 真正拉起 OMP **之前**同步执行。
+- 在 `run` / `reply` / `approve` / `deny` 真正拉起 OMP **之前**同步执行。
 - 检测到模型连接类错误（如 `UND_ERR_SOCKET`、`ECONNRESET`、对端关闭）并触发 OMP 自动重试时，**并行**再跑一次预检。
 - 事件类型：`preflight`（`ok` / `exit N` / `started after connection error`）。
+- 预检 stderr 透传给操作者（重连诊断可见）。
 
 #### 5.1.8 Session 互斥
 
-- 同一 `session` 仅允许一个 `running` 任务。
+- 同一 `session` 仅允许一个 `running` 或 `queued` 任务。
 - `run` 占用中 session、对 running 任务 `reply` → 拒绝，exit 1。
 - Task ID：`<session>-<YYYYMMDD-HHMMSS>`（本地时区生成；存储时间 ISO UTC）。
+- `reply` / `approve` / `deny` 必须 `--resume` 已有会话（`session_file` 优先，否则 `omp_session_id`）；二者皆不可用则硬失败，禁止静默新开冷会话。
 
 ---
 
@@ -592,7 +594,6 @@ omp-task 监视 approvals.jsonl → Webhook needs_approval
 ### 11.3 冒烟
 
 ```bash
-PI_NOTIFY_OFF=1  # 勿用；应使用：
 OMP_NOTIFY_OFF=1 ~/tools/omp-call/omp-task run /tmp 'Reply with only OK' \
   --session smoke --owner <BOT_ID>
 # STATE done 后
@@ -702,3 +703,12 @@ E2E（含产物）：
 ---
 
 *本文档是实现 `grokbot-and-omp` 的唯一功能规格来源：实现功能必须完全对标 GAP；与 OMP 相关的差异仅允许出现在 RPC/CLI/路径/环境变量适配层。*
+
+---
+
+## 修订记录
+
+| 版本 | 说明 |
+| --- | --- |
+| v1.0 | 初稿（设计定稿） |
+| v1.1 | 与实现同步：`agentInvoked:false` 完成边界；resume 优先 `session_file` 否则 `omp_session_id`，缺失则硬失败；agent 轮次无助手文本视为 failed；session 互斥含 `queued`；preflight 覆盖 deny 且透传 stderr；`deny` 校验 req；去掉错误的 `PI_NOTIFY_OFF` 示例 |

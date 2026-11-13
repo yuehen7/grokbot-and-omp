@@ -55,6 +55,7 @@ Bot 的 agent id，通常在 `/home/box/agent-data/agents/<ID>/profile.json` 的
   3. 用户明确拒绝：`omp-task deny <ID> <req> --owner <ID>`；
   4. **铁律：Bot 自己永远不能替用户授权放行。**
 - **磁盘是唯一事实来源**：`~/.omp/tasks/<ID>/` 才是真相；漏了通知不要重跑，用 `pending` 找回。
+- **空闲超时**：若 OMP 持续约 300 秒（可用 `--idle-timeout` / `OMP_TASK_IDLE_TIMEOUT` 调整）没有任何新 RPC 事件，`omp-task` 会判为 `failed`（`idle timeout`）并照常通知。多半是网络或模型服务断了：先查通路（有 `omp-preflight` 就靠它），再用 `reply` 续跑，别直接盲着重开。
 
 ## 5. 验收并确认
 1. 读 `~/.omp/tasks/<ID>/result.md`，再**亲自**检查产物、diff 或测试。OMP 的回复只是声称，不算证据。

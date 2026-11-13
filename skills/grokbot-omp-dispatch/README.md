@@ -18,4 +18,4 @@ npx skills add yuehen7/grokbot-and-omp --skill grokbot-omp-dispatch --global --y
 ~/tools/omp-call/omp-task run <工作目录> '<任务书>' --session <短名> --owner <ID> --notify-prefix <BOT> [--model <provider/model>]
 ```
 
-⚠️ 删除、发送、付款、发帖、`git push` 永远不交给 OMP；审批放行只由用户决定。
+⚠️ 删除、发送、付款、发帖、`git push` 永远不交给 OMP。`needs_approval` 必须把命令原样给用户看，**严禁擅自 `approve`**；不读不打印通知密钥与 `~/.omp/agent/` 凭据。

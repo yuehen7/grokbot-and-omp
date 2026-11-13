@@ -7,7 +7,9 @@
 
 import { spawn, spawnSync } from "node:child_process";
 import {
+  accessSync,
   appendFileSync,
+  constants as fsConstants,
   existsSync,
   mkdirSync,
   readFileSync,
@@ -285,10 +287,35 @@ function assertSessionFree(session, ignoreId) {
     } catch {
       continue;
     }
-    if (status?.state === "running" && status.session === session) {
-      fail(`session "${session}" is already in use by running task ${status.id}`);
+    // Treat queued as occupied too: otherwise two parallel `run`s can both pass
+    // while the other is still writing its queued status (TOCTOU).
+    if (
+      (status?.state === "running" || status?.state === "queued") &&
+      status.session === session
+    ) {
+      fail(`session "${session}" is already in use by ${status.state} task ${status.id}`);
     }
   }
+}
+
+function isExecutable(p) {
+  try {
+    accessSync(p, fsConstants.X_OK);
+    return true;
+  } catch {
+    return false;
+  }
+}
+
+/** Prefer an on-disk session file; fall back to OMP session id (--resume accepts both). */
+function resolveResumeTarget(status) {
+  if (status?.session_file && existsSync(status.session_file)) {
+    return { kind: "file", value: status.session_file };
+  }
+  if (typeof status?.omp_session_id === "string" && status.omp_session_id.trim()) {
+    return { kind: "id", value: status.omp_session_id.trim() };
+  }
+  return null;
 }
 
 // --------------------------------------------------------- omp invocation
@@ -307,21 +334,29 @@ function findGuardExtensionPath() {
 
 function findPreflightPath() {
   if (process.env.OMP_TASK_PREFLIGHT) {
-    return process.env.OMP_TASK_PREFLIGHT;
+    const p = process.env.OMP_TASK_PREFLIGHT;
+    if (existsSync(p) && isExecutable(p)) return p;
+    return null;
   }
   const currentDir = dirname(fileURLToPath(import.meta.url));
   for (const p of [resolve(currentDir, "omp-preflight"), resolve(currentDir, "..", "bin", "omp-preflight")]) {
-    if (existsSync(p)) return p;
+    if (existsSync(p) && isExecutable(p)) return p;
   }
   return null;
 }
 
 function runPreflight(dir) {
   const pf = findPreflightPath();
-  if (!pf || !existsSync(pf)) return;
+  if (!pf) {
+    if (process.env.OMP_TASK_PREFLIGHT) {
+      appendEvent(dir, "preflight", undefined, `skipped: not executable ${process.env.OMP_TASK_PREFLIGHT}`);
+    }
+    return;
+  }
   appendEvent(dir, "preflight", undefined, "started");
   try {
-    const r = spawnSync(pf, [], { stdio: "ignore", timeout: 180000 });
+    // Keep stderr visible so Tailscale/reconnect diagnostics reach the operator.
+    const r = spawnSync(pf, [], { stdio: ["ignore", "ignore", "inherit"], timeout: 180000 });
     if (r.error) {
       appendEvent(dir, "preflight", undefined, `error ${r.error.message}`);
     } else {
@@ -334,9 +369,9 @@ function runPreflight(dir) {
 
 function runPreflightAsync(dir, why) {
   const pf = findPreflightPath();
-  if (!pf || !existsSync(pf)) return;
+  if (!pf) return;
   try {
-    const c = spawn(pf, [], { stdio: "ignore" });
+    const c = spawn(pf, [], { stdio: ["ignore", "ignore", "inherit"] });
     c.on("exit", (code) => appendEvent(dir, "preflight", undefined, code === 0 ? "ok" : `exit ${code}`));
     c.on("error", (e) => appendEvent(dir, "preflight", undefined, `spawn failed: ${e.message}`));
     appendEvent(dir, "preflight", undefined, `started after connection error (${why})`);
@@ -352,7 +387,7 @@ function toolsFor(write, web) {
   return tools.join(",");
 }
 
-function ompArgs(status, useResume) {
+function ompArgs(status, resumeTarget) {
   const opts = status.options && typeof status.options === "object" ? status.options : {};
   const model = status.model || DEFAULT_MODEL;
   const thinking = opts.thinking || DEFAULT_THINKING;
@@ -361,8 +396,13 @@ function ompArgs(status, useResume) {
   const guardDisabled = process.env.OMP_GUARD === "off" || opts.guard === "off";
 
   const args = ["--mode", "rpc"];
-  if (useResume) {
-    args.push("--resume", status.session_file);
+  if (resumeTarget) {
+    // --resume accepts a session file path or an id/prefix (OMP CLI).
+    args.push("--resume", resumeTarget.value);
+    if (resumeTarget.kind === "id") {
+      // Keep lookups scoped to the task session store when resuming by id.
+      args.push("--session-dir", SESSION_DIR);
+    }
   } else {
     args.push("--session-dir", SESSION_DIR);
   }
@@ -370,6 +410,7 @@ function ompArgs(status, useResume) {
   if (thinking) args.push("--thinking", String(thinking));
   args.push("--tools", toolsFor(allowWrite, allowWeb));
   // These hosts are non-interactive; OMP's own tool prompt must not hang.
+  // This is NOT Bot-side approve/deny: omp-guard still blocks disasters.
   args.push("--auto-approve");
   if (!guardDisabled) {
     const guardPath = findGuardExtensionPath();
@@ -510,6 +551,21 @@ function execute(id, prompt, timeoutSec, idleTimeoutSec) {
   const n = runs.length + 1;
   const startedAt = iso();
 
+  // n === 1 is the first turn; later turns (reply/approve/deny) must resume.
+  const requireResume = n > 1;
+  if (status.session_file && !existsSync(status.session_file)) {
+    appendEvent(dir, "session_missing", undefined, status.session_file);
+  }
+  const resumeTarget = resolveResumeTarget(status);
+  // Fail before flipping state to running / appending a run, so a missing
+  // session cannot leave the task stuck as running with a dead pid.
+  if (requireResume && !resumeTarget) {
+    fail(
+      `task ${id} has no resumable OMP session (missing usable session_file and omp_session_id); ` +
+        "refusing to start a cold session that would lose context",
+    );
+  }
+
   writeFileSync(join(dir, `prompt-${n}.txt`), prompt.endsWith("\n") ? prompt : `${prompt}\n`);
   runs.push({ n, prompt, started_at: startedAt, ended_at: null, exit_code: null });
   status.runs = runs;
@@ -525,15 +581,17 @@ function execute(id, prompt, timeoutSec, idleTimeoutSec) {
   // OMP_TASK_PREFLIGHT when bin/omp-preflight exists beside the entry point.
   runPreflight(dir);
   appendEvent(dir, "task_start", undefined, prompt);
+  if (resumeTarget) {
+    appendEvent(
+      dir,
+      "session_resume",
+      undefined,
+      `${resumeTarget.kind}=${resumeTarget.value}`,
+    );
+  }
 
   const opts = status.options && typeof status.options === "object" ? status.options : {};
   const guardDisabled = process.env.OMP_GUARD === "off" || opts.guard === "off";
-  const useResume = Boolean(
-    status.session_file && existsSync(status.session_file) && isDir(status.cwd)
-  );
-  if (status.session_file && !useResume) {
-    appendEvent(dir, "session_missing", undefined, status.session_file);
-  }
 
   try {
     mkdirSync(SESSION_DIR, { recursive: true });
@@ -546,7 +604,7 @@ function execute(id, prompt, timeoutSec, idleTimeoutSec) {
     process.stderr.write("omp-task: warning: omp-guard.ts not found; running without disaster protection\n");
   }
 
-  const args = ompArgs(status, useResume);
+  const args = ompArgs(status, resumeTarget);
 
   // Remove notification URL/secret from OMP's environment. Provider credentials
   // are deliberately kept: OMP needs them to reach the model.
@@ -591,6 +649,7 @@ function execute(id, prompt, timeoutSec, idleTimeoutSec) {
   let startedPrompt = false;
   let promptResult = null;
   let sessionInfoRequested = false;
+  let localPrompt = false; // slash/local handling: agentInvoked=false
   const promptId = `p${n}`;
   const stateId = `state${n}`;
   const negotiateId = `neg${n}`;
@@ -807,13 +866,39 @@ function execute(id, prompt, timeoutSec, idleTimeoutSec) {
   function beginPrompt() {
     // For a fresh session, ask for its file/id before prompting so reply can
     // resume even if the task is killed later in this run.
-    if (!useResume && !sessionInfoRequested) {
+    if (!resumeTarget && !sessionInfoRequested) {
       sessionInfoRequested = true;
       send({ id: stateId, type: "get_state" });
       setTimeout(() => sendPrompt(), 2000).unref();
       return;
     }
     sendPrompt();
+  }
+
+  // Local/slash prompts set agentInvoked=false. Empty text is allowed here
+  // (e.g. a no-op slash); errors without text fail.
+  function finishLocalPrompt() {
+    if (aborting) return finish(EXIT.cancelled);
+    if (timedOut) return finish(EXIT.timeout);
+    if (idleTimedOut) return finish(EXIT.failed);
+    if (lastError && !lastText) return finish(EXIT.failed);
+    return finish(EXIT.done);
+  }
+
+  // Align with GAP agent_settled: cancelled/timeout/idle win first; then
+  // error-without-text → failed; empty assistant text → failed; else done.
+  // Local prompts reuse the looser finishLocalPrompt rules.
+  function finishCompleted() {
+    if (localPrompt) return finishLocalPrompt();
+    if (aborting) return finish(EXIT.cancelled);
+    if (timedOut) return finish(EXIT.timeout);
+    if (idleTimedOut) return finish(EXIT.failed);
+    if (lastError && !lastText) return finish(EXIT.failed);
+    if (!lastText) {
+      lastError ||= "no assistant text";
+      return finish(EXIT.failed);
+    }
+    return finish(EXIT.done);
   }
 
   function finishForPromptResult(rec) {
@@ -838,10 +923,7 @@ function execute(id, prompt, timeoutSec, idleTimeoutSec) {
       appendEvent(dir, "prompt_completed", undefined, "waiting for session_settled");
       return; // wait for session_settled / a terminal agent_end + settle
     }
-    if (aborting) return finish(EXIT.cancelled);
-    if (timedOut) return finish(EXIT.timeout);
-    if (idleTimedOut) return finish(EXIT.failed);
-    return finish(EXIT.done);
+    return finishCompleted();
   }
 
   let buf = Buffer.alloc(0);
@@ -920,7 +1002,16 @@ function execute(id, prompt, timeoutSec, idleTimeoutSec) {
           appendEvent(dir, "error", undefined, lastError);
           finish(EXIT.failed);
         } else if (rec.data?.agentInvoked === false) {
+          // Local/slash handling: usually no prompt_result; give a short grace
+          // so preceding/following command_output can populate lastText.
+          localPrompt = true;
           appendEvent(dir, "prompt_local", undefined, "agentInvoked=false");
+          if (!fallbackTimer) {
+            fallbackTimer = setTimeout(() => {
+              if (finished || promptResult) return;
+              finishLocalPrompt();
+            }, 500);
+          }
         }
         return;
       }
@@ -986,6 +1077,22 @@ function execute(id, prompt, timeoutSec, idleTimeoutSec) {
       );
       return;
     }
+    if (type === "command_output") {
+      // Local slash/commands may stream text here instead of an assistant message.
+      const t =
+        typeof rec.text === "string"
+          ? rec.text
+          : typeof rec.output === "string"
+            ? rec.output
+            : typeof rec.content === "string"
+              ? rec.content
+              : "";
+      if (t.trim()) {
+        lastText = t.trim();
+        appendEvent(dir, "command_output", undefined, lastText);
+      }
+      return;
+    }
     if (type === "agent_end") {
       const terminal = rec.isTerminal !== false;
       appendEvent(
@@ -997,14 +1104,13 @@ function execute(id, prompt, timeoutSec, idleTimeoutSec) {
           .join(" "),
       );
       if (terminal && promptResult?.status === "completed" && promptResult.sessionSettled !== false) {
-        finish(EXIT.done);
+        finishCompleted();
       } else if (terminal && !promptResult && !fallbackTimer) {
         // Protocol watchdog: prompt_result normally arrives immediately after
         // agent_end, but never hang if an older server omits it.
         fallbackTimer = setTimeout(() => {
           if (finished || promptResult) return;
-          if (lastError && !lastText) finish(EXIT.failed);
-          else finish(lastText ? EXIT.done : EXIT.failed);
+          finishCompleted();
         }, 2500);
       }
       return;
@@ -1028,10 +1134,7 @@ function execute(id, prompt, timeoutSec, idleTimeoutSec) {
     if (type === "session_settled") {
       appendEvent(dir, "session_settled");
       if (promptResult?.status === "completed") {
-        if (aborting) finish(EXIT.cancelled);
-        else if (timedOut) finish(EXIT.timeout);
-        else if (idleTimedOut) finish(EXIT.failed);
-        else finish(EXIT.done);
+        finishCompleted();
       }
       return;
     }
@@ -1364,7 +1467,11 @@ async function cmdDeny(pos, flags) {
     }
   }
   const dir = taskDir(id);
-  appendEvent(dir, "denied", undefined, `req=${req}`);
+  const item = findApprovalReq(dir, req);
+  if (!item || !item.command) {
+    fail(`approval request not found: ${req}`);
+  }
+  appendEvent(dir, "denied", undefined, `req=${req} cmd=${item.command}`);
 
   const msg = "被拒绝，不要执行，换个不删除的做法或者直接跳过";
 
