@@ -15,6 +15,7 @@ import {
   readFileSync,
   readdirSync,
   renameSync,
+  rmSync,
   statSync,
   writeFileSync,
 } from "node:fs";
@@ -160,6 +161,128 @@ process.stderr.on("error", () => {});
 const taskDir = (id) => join(TASK_ROOT, id);
 const statusPath = (id) => join(taskDir(id), "status.json");
 
+// Session mutex is an atomic per-session lock file. Check-then-act on
+// status.json is not enough: two simultaneous `run`s can both see "free"
+// before either writes its queued record. writeFileSync(..., {flag:"wx"})
+// creates the lock with O_CREAT|O_EXCL in one step.
+const LOCK_ROOT = join(TASK_ROOT, ".locks");
+const lockPath = (session) => join(LOCK_ROOT, `${session}.lock`);
+const LOCK_GRACE_MS = 2000; // time allowed between lock creation and owner write
+
+function readLockOwner(session) {
+  try {
+    const raw = readFileSync(lockPath(session), "utf8");
+    if (!raw.trim()) return null; // creator may not have written content yet
+    const holder = JSON.parse(raw);
+    return holder && typeof holder === "object" ? holder : null;
+  } catch {
+    return null;
+  }
+}
+
+function lockIsStale(session) {
+  const p = lockPath(session);
+  const holder = readLockOwner(session);
+  if (!holder) {
+    // Empty/corrupt lock: give a just-created lock time to receive its owner,
+    // otherwise a second run can steal it in the create/write window.
+    try {
+      return Date.now() - statSync(p).mtimeMs > LOCK_GRACE_MS;
+    } catch {
+      return true;
+    }
+  }
+  if (holder.id && validTaskId(holder.id)) {
+    try {
+      const st = JSON.parse(readFileSync(statusPath(holder.id), "utf8"));
+      if (TERMINAL.has(st.state)) return true;
+    } catch {
+      // no usable status: fall through to the PID check
+    }
+  }
+  if (holder.pid && isAlive(holder.pid)) return false;
+  return true;
+}
+
+function setLockOwner(lock, id) {
+  if (!lock) return;
+  lock.id = id ?? null;
+  try {
+    writeFileSync(
+      lock.path,
+      `${JSON.stringify({ id: lock.id, pid: process.pid, created_at: iso() })}\n`,
+    );
+  } catch {
+    // A lock without readable owner content is handled by lockIsStale().
+  }
+}
+
+function acquireSessionLock(session, taskId = null) {
+  mkdirSync(LOCK_ROOT, { recursive: true });
+  const path = lockPath(session);
+  for (let attempt = 0; attempt < 3; attempt++) {
+    try {
+      // Atomic create; the content is written in the same call.
+      writeFileSync(
+        path,
+        `${JSON.stringify({ id: taskId ?? null, pid: process.pid, created_at: iso() })}\n`,
+        { flag: "wx" },
+      );
+      return { path, session, id: taskId ?? null };
+    } catch (e) {
+      if (e.code !== "EEXIST") throw e;
+      if (!lockIsStale(session)) {
+        const holder = readLockOwner(session);
+        fail(`session "${session}" is already in use by ${holder?.id || "another task"}`);
+      }
+      try {
+        rmSync(path, { force: true });
+      } catch {
+        // retry; a concurrent release/claim will be caught next round
+      }
+    }
+  }
+  fail(`session "${session}" is already in use`);
+}
+
+function releaseSessionLock(lock) {
+  if (!lock) return;
+  try {
+    const holder = readLockOwner(lock.session);
+    if (holder?.id && lock.id && holder.id !== lock.id) return; // not ours
+  } catch {
+    // fall through and remove our lock
+  }
+  try {
+    rmSync(lock.path, { force: true });
+  } catch {}
+}
+
+function releaseLockForTask(session, id) {
+  try {
+    const holder = readLockOwner(session);
+    if (holder?.id && holder.id !== id) return; // owned by a different task
+  } catch {
+    // fall through
+  }
+  try {
+    rmSync(lockPath(session), { force: true });
+  } catch {}
+}
+
+/** Find an OMP session file for an id under the configured task session dir. */
+function findSessionFileById(id) {
+  if (!id) return null;
+  try {
+    for (const name of readdirSync(SESSION_DIR)) {
+      if (name.endsWith(".jsonl") && name.includes(id)) {
+        return join(SESSION_DIR, name);
+      }
+    }
+  } catch {}
+  return null;
+}
+
 function writeStatus(id, status) {
   const dir = taskDir(id);
   mkdirSync(dir, { recursive: true });
@@ -238,7 +361,9 @@ function listTaskIds() {
   } catch {
     return [];
   }
-  return entries.filter((e) => e.isDirectory()).map((e) => e.name);
+  return entries
+    .filter((e) => e.isDirectory() && !e.name.startsWith("."))
+    .map((e) => e.name);
 }
 
 // Every subcommand starts here: a task still marked running whose process is
@@ -270,6 +395,7 @@ function orphanCheck() {
     try {
       writeStatus(id, status);
       appendEvent(taskDir(id), "orphan_detected", undefined, "state=interrupted");
+      releaseLockForTask(status.session, id);
       changed++;
     } catch {
       // ignore unreadable/unwritable task dirs
@@ -279,6 +405,8 @@ function orphanCheck() {
 }
 
 function assertSessionFree(session, ignoreId) {
+  // Fast advisory check only. The real mutex is acquireSessionLock()
+  // (O_CREAT|O_EXCL); queued/running status alone cannot close the TOCTOU.
   for (const id of listTaskIds()) {
     if (id === ignoreId) continue;
     let status;
@@ -287,8 +415,6 @@ function assertSessionFree(session, ignoreId) {
     } catch {
       continue;
     }
-    // Treat queued as occupied too: otherwise two parallel `run`s can both pass
-    // while the other is still writing its queued status (TOCTOU).
     if (
       (status?.state === "running" || status?.state === "queued") &&
       status.session === session
@@ -307,13 +433,20 @@ function isExecutable(p) {
   }
 }
 
-/** Prefer an on-disk session file; fall back to OMP session id (--resume accepts both). */
+/**
+ * Resolve a resumable OMP session file. Prefer the recorded path; if it was
+ * moved, search the configured task session dir by session id. An id alone is
+ * not a valid fallback: OMP resolves ids by scanning session files, so a
+ * missing file would fail at spawn time and produce a confusing task failure.
+ */
 function resolveResumeTarget(status) {
   if (status?.session_file && existsSync(status.session_file)) {
     return { kind: "file", value: status.session_file };
   }
-  if (typeof status?.omp_session_id === "string" && status.omp_session_id.trim()) {
-    return { kind: "id", value: status.omp_session_id.trim() };
+  const sid = typeof status?.omp_session_id === "string" ? status.omp_session_id.trim() : "";
+  if (sid) {
+    const found = findSessionFileById(sid);
+    if (found) return { kind: "file", value: found };
   }
   return null;
 }
@@ -333,24 +466,21 @@ function findGuardExtensionPath() {
 }
 
 function findPreflightPath() {
-  if (process.env.OMP_TASK_PREFLIGHT) {
-    const p = process.env.OMP_TASK_PREFLIGHT;
-    if (existsSync(p) && isExecutable(p)) return p;
-    return null;
-  }
+  // Return a discovered candidate even if it is not executable, so callers can
+  // record why it was skipped instead of silently disabling preflight.
+  if (process.env.OMP_TASK_PREFLIGHT) return process.env.OMP_TASK_PREFLIGHT;
   const currentDir = dirname(fileURLToPath(import.meta.url));
   for (const p of [resolve(currentDir, "omp-preflight"), resolve(currentDir, "..", "bin", "omp-preflight")]) {
-    if (existsSync(p) && isExecutable(p)) return p;
+    if (existsSync(p)) return p;
   }
   return null;
 }
 
 function runPreflight(dir) {
   const pf = findPreflightPath();
-  if (!pf) {
-    if (process.env.OMP_TASK_PREFLIGHT) {
-      appendEvent(dir, "preflight", undefined, `skipped: not executable ${process.env.OMP_TASK_PREFLIGHT}`);
-    }
+  if (!pf) return;
+  if (!isExecutable(pf)) {
+    appendEvent(dir, "preflight", undefined, `skipped: not executable ${pf}`);
     return;
   }
   appendEvent(dir, "preflight", undefined, "started");
@@ -370,6 +500,10 @@ function runPreflight(dir) {
 function runPreflightAsync(dir, why) {
   const pf = findPreflightPath();
   if (!pf) return;
+  if (!isExecutable(pf)) {
+    appendEvent(dir, "preflight", undefined, `skipped: not executable ${pf}`);
+    return;
+  }
   try {
     const c = spawn(pf, [], { stdio: ["ignore", "ignore", "inherit"] });
     c.on("exit", (code) => appendEvent(dir, "preflight", undefined, code === 0 ? "ok" : `exit ${code}`));
@@ -397,12 +531,7 @@ function ompArgs(status, resumeTarget) {
 
   const args = ["--mode", "rpc"];
   if (resumeTarget) {
-    // --resume accepts a session file path or an id/prefix (OMP CLI).
     args.push("--resume", resumeTarget.value);
-    if (resumeTarget.kind === "id") {
-      // Keep lookups scoped to the task session store when resuming by id.
-      args.push("--session-dir", SESSION_DIR);
-    }
   } else {
     args.push("--session-dir", SESSION_DIR);
   }
@@ -544,15 +673,21 @@ function createFrameAssembler() {
 const INTERACTIVE_UI = new Set(["select", "confirm", "input", "editor", "ask"]);
 
 // Run one prompt turn inside a task, stream events, update status, exit.
-function execute(id, prompt, timeoutSec, idleTimeoutSec) {
+// `fresh` must come from the subcommand, never from the mutable runs array:
+// `run` is always a fresh turn, while reply/approve/deny must resume.
+// `onPromptAccepted` runs once after OMP accepts the prompt (before tools), so
+// approve can whitelist only when the release message will actually be delivered.
+function execute(id, prompt, timeoutSec, idleTimeoutSec, runOptions = {}) {
+  const { fresh = false, lock = null } = runOptions;
+  let onPromptAccepted =
+    typeof runOptions.onPromptAccepted === "function" ? runOptions.onPromptAccepted : null;
   const dir = taskDir(id);
   let status = readStatus(id);
   const runs = Array.isArray(status.runs) ? status.runs : [];
   const n = runs.length + 1;
   const startedAt = iso();
 
-  // n === 1 is the first turn; later turns (reply/approve/deny) must resume.
-  const requireResume = n > 1;
+  const requireResume = !fresh;
   if (status.session_file && !existsSync(status.session_file)) {
     appendEvent(dir, "session_missing", undefined, status.session_file);
   }
@@ -560,8 +695,10 @@ function execute(id, prompt, timeoutSec, idleTimeoutSec) {
   // Fail before flipping state to running / appending a run, so a missing
   // session cannot leave the task stuck as running with a dead pid.
   if (requireResume && !resumeTarget) {
+    releaseSessionLock(lock);
     fail(
-      `task ${id} has no resumable OMP session (missing usable session_file and omp_session_id); ` +
+      `task ${id} has no resumable OMP session file ` +
+        "(session_file missing and no matching session id in OMP_TASK_SESSION_DIR); " +
         "refusing to start a cold session that would lose context",
     );
   }
@@ -740,6 +877,21 @@ function execute(id, prompt, timeoutSec, idleTimeoutSec) {
     }
     const state = stateFromCode(code);
     if (st) {
+      // get_state may report a path before the file exists; local/slash turns
+      // never write one. Only keep metadata that resolveResumeTarget can use.
+      const resolvedSession = resolveResumeTarget(st);
+      if (resolvedSession?.kind === "file") {
+        if (st.session_file !== resolvedSession.value) st.session_file = resolvedSession.value;
+      } else if (st.session_file || st.omp_session_id) {
+        appendEvent(
+          dir,
+          "session_cleared",
+          undefined,
+          st.session_file || st.omp_session_id,
+        );
+        st.session_file = null;
+        st.omp_session_id = null;
+      }
       st.state = state;
       st.ended_at = end;
       st.exit_code = code;
@@ -761,12 +913,14 @@ function execute(id, prompt, timeoutSec, idleTimeoutSec) {
         // status write failure must not mask the exit code
       }
     }
-    if (lastText) {
-      try {
-        writeResult(dir, lastText);
-      } catch {
-        // ignore
-      }
+    try {
+      // No assistant text means no result for this turn. Do not leave the
+      // previous turn's result.md in place: the webhook routine may read it as
+      // this turn's output.
+      if (lastText) writeResult(dir, lastText);
+      else rmSync(join(dir, "result.md"), { force: true });
+    } catch {
+      // ignore
     }
     appendEvent(dir, "task_end", undefined, `state=${state} exit=${code}`);
     const notifyPrefix = st?.notify_prefix ?? status.notify_prefix ?? null;
@@ -805,6 +959,7 @@ function execute(id, prompt, timeoutSec, idleTimeoutSec) {
         // already gone
       }
     }, 8000).unref();
+    releaseSessionLock(lock);
     flushAndExit(code);
   }
 
@@ -841,13 +996,22 @@ function execute(id, prompt, timeoutSec, idleTimeoutSec) {
     try {
       const st = JSON.parse(readFileSync(statusPath(id), "utf8"));
       let changed = false;
-      if (file && st.session_file !== file) {
+      // Only persist a session path that already exists. get_state can report a
+      // path before OMP creates the file (and local/slash turns never create one).
+      if (file && existsSync(file) && st.session_file !== file) {
         st.session_file = file;
         changed = true;
       }
       if (sid && st.omp_session_id !== sid) {
         st.omp_session_id = sid;
         changed = true;
+      }
+      if ((!st.session_file || !existsSync(st.session_file)) && sid) {
+        const found = findSessionFileById(sid);
+        if (found && st.session_file !== found) {
+          st.session_file = found;
+          changed = true;
+        }
       }
       if (changed) writeStatus(id, st);
     } catch {
@@ -1001,16 +1165,32 @@ function execute(id, prompt, timeoutSec, idleTimeoutSec) {
           lastError = rec.error || "prompt rejected";
           appendEvent(dir, "error", undefined, lastError);
           finish(EXIT.failed);
-        } else if (rec.data?.agentInvoked === false) {
-          // Local/slash handling: usually no prompt_result; give a short grace
-          // so preceding/following command_output can populate lastText.
-          localPrompt = true;
-          appendEvent(dir, "prompt_local", undefined, "agentInvoked=false");
-          if (!fallbackTimer) {
-            fallbackTimer = setTimeout(() => {
-              if (finished || promptResult) return;
-              finishLocalPrompt();
-            }, 500);
+        } else {
+          // OMP accepted the prompt: apply deferred side effects (e.g. approve
+          // whitelist) before any tool_call can run.
+          if (onPromptAccepted) {
+            const cb = onPromptAccepted;
+            onPromptAccepted = null;
+            try {
+              cb();
+            } catch (e) {
+              lastError = `onPromptAccepted failed: ${e?.message || e}`;
+              appendEvent(dir, "error", undefined, lastError);
+              finish(EXIT.failed);
+              return;
+            }
+          }
+          if (rec.data?.agentInvoked === false) {
+            // Local/slash handling: usually no prompt_result; give a short grace
+            // so preceding/following command_output can populate lastText.
+            localPrompt = true;
+            appendEvent(dir, "prompt_local", undefined, "agentInvoked=false");
+            if (!fallbackTimer) {
+              fallbackTimer = setTimeout(() => {
+                if (finished || promptResult) return;
+                finishLocalPrompt();
+              }, 500);
+            }
           }
         }
         return;
@@ -1214,7 +1394,10 @@ function execute(id, prompt, timeoutSec, idleTimeoutSec) {
 
   child.on("exit", (code) => {
     if (finished) return;
-    lastError ||= `omp exited early (code ${code})`;
+    const detail = stderrBuf.trim();
+    lastError ||= detail
+      ? `omp exited early (code ${code}): ${detail}`
+      : `omp exited early (code ${code})`;
     appendEvent(dir, "omp_exit", undefined, `code=${code}`);
     finish(aborting ? EXIT.cancelled : timedOut ? EXIT.timeout : EXIT.failed);
   });
@@ -1284,11 +1467,18 @@ function idleTimeoutOf(flags) {
 }
 
 function newTaskId(session) {
+  // Claim the task directory atomically. Two simultaneous runs can share the
+  // same one-second timestamp; mkdir() lets exactly one of them win each id.
   const base = `${session}-${stamp()}`;
-  let id = base;
-  let i = 2;
-  while (existsSync(taskDir(id))) id = `${base}-${i++}`;
-  return id;
+  for (let i = 1; ; i++) {
+    const id = i === 1 ? base : `${base}-${i}`;
+    try {
+      mkdirSync(taskDir(id));
+      return id;
+    } catch (e) {
+      if (e.code !== "EEXIST") throw e;
+    }
+  }
 }
 
 function cmdRun(pos, flags) {
@@ -1304,6 +1494,7 @@ function cmdRun(pos, flags) {
   if (!isDir(cwd)) usageError(`cwd is not a directory: ${cwd}`);
   const session = cleanSession(flags.session);
   assertSessionFree(session);
+  const lock = acquireSessionLock(session);
   const owner = taskOwner(flags);
   const notifyPrefix =
     typeof flags["notify-prefix"] === "string" && flags["notify-prefix"]
@@ -1314,7 +1505,14 @@ function cmdRun(pos, flags) {
     typeof flags.thinking === "string" && flags.thinking ? flags.thinking : DEFAULT_THINKING;
   const guard = flags.guard === "off" ? "off" : "on";
 
-  const id = newTaskId(session);
+  let id;
+  try {
+    id = newTaskId(session);
+    setLockOwner(lock, id);
+  } catch (e) {
+    releaseSessionLock(lock);
+    throw e;
+  }
   const status = {
     id,
     session,
@@ -1340,9 +1538,14 @@ function cmdRun(pos, flags) {
       guard,
     },
   };
-  writeStatus(id, status);
+  try {
+    writeStatus(id, status);
+  } catch (e) {
+    releaseSessionLock(lock);
+    throw e;
+  }
   process.stdout.write(`TASK ${id}\n`);
-  execute(id, prompt, timeoutSec, idleTimeoutSec);
+  execute(id, prompt, timeoutSec, idleTimeoutSec, { fresh: true, lock });
 }
 
 function cmdReply(pos, flags) {
@@ -1366,7 +1569,8 @@ function cmdReply(pos, flags) {
   if (!TERMINAL.has(status.state)) fail(`task ${id} is in state ${status.state}`);
   if (!isDir(status.cwd)) fail(`task cwd no longer exists: ${status.cwd}`);
   assertSessionFree(status.session, id);
-  execute(id, prompt, timeoutSec, idleTimeoutSec);
+  const lock = acquireSessionLock(status.session, id);
+  execute(id, prompt, timeoutSec, idleTimeoutSec, { fresh: false, lock });
 }
 
 function findApprovalReq(dir, req) {
@@ -1430,9 +1634,6 @@ async function cmdApprove(pos, flags) {
   if (!item || !item.command) {
     fail(`approval request not found: ${req}`);
   }
-  appendApprovedCommand(dir, item.command);
-  appendEvent(dir, "approved", undefined, `req=${req} cmd=${item.command}`);
-
   const msg = `req=${req} 已放行，可以执行这条命令：${item.command}`;
 
   if (status.state === "running") {
@@ -1441,14 +1642,30 @@ async function cmdApprove(pos, flags) {
 
   const currentSt = readStatus(id);
   if (currentSt.state === "running") {
-    fail(`task ${id} is still running; command added to approved.json, send message once finished`);
+    fail(`task ${id} is still running; wait or cancel it before approving`);
   }
   if (!isDir(currentSt.cwd)) fail(`task cwd no longer exists: ${currentSt.cwd}`);
+  // Validate resumability before spawn. Do NOT whitelist yet: if OMP never
+  // accepts the release prompt, the dangerous command must stay blocked.
+  if (!resolveResumeTarget(currentSt)) {
+    fail(
+      `task ${id} has no resumable OMP session file; refusing to whitelist ` +
+        `"${item.command}" without delivering the release message`,
+    );
+  }
   assertSessionFree(currentSt.session, id);
+  const lock = acquireSessionLock(currentSt.session, id);
 
   const timeoutSec = timeoutOf(flags);
   const idleTimeoutSec = idleTimeoutOf(flags);
-  execute(id, msg, timeoutSec, idleTimeoutSec);
+  execute(id, msg, timeoutSec, idleTimeoutSec, {
+    fresh: false,
+    lock,
+    onPromptAccepted: () => {
+      appendApprovedCommand(dir, item.command);
+      appendEvent(dir, "approved", undefined, `req=${req} cmd=${item.command}`);
+    },
+  });
 }
 
 async function cmdDeny(pos, flags) {
@@ -1471,8 +1688,6 @@ async function cmdDeny(pos, flags) {
   if (!item || !item.command) {
     fail(`approval request not found: ${req}`);
   }
-  appendEvent(dir, "denied", undefined, `req=${req} cmd=${item.command}`);
-
   const msg = "被拒绝，不要执行，换个不删除的做法或者直接跳过";
 
   if (status.state === "running") {
@@ -1484,11 +1699,22 @@ async function cmdDeny(pos, flags) {
     fail(`task ${id} is still running; wait or cancel it before denying`);
   }
   if (!isDir(currentSt.cwd)) fail(`task cwd no longer exists: ${currentSt.cwd}`);
+  // The denial must actually reach an agent; do not record it otherwise.
+  if (!resolveResumeTarget(currentSt)) {
+    fail(`task ${id} has no resumable OMP session file; refusing to record a denial OMP will never see`);
+  }
   assertSessionFree(currentSt.session, id);
+  const lock = acquireSessionLock(currentSt.session, id);
 
   const timeoutSec = timeoutOf(flags);
   const idleTimeoutSec = idleTimeoutOf(flags);
-  execute(id, msg, timeoutSec, idleTimeoutSec);
+  execute(id, msg, timeoutSec, idleTimeoutSec, {
+    fresh: false,
+    lock,
+    onPromptAccepted: () => {
+      appendEvent(dir, "denied", undefined, `req=${req} cmd=${item.command}`);
+    },
+  });
 }
 
 function cmdStatus(pos) {
@@ -1577,6 +1803,7 @@ async function cmdCancel(pos) {
     status.pid = null;
     writeStatus(id, status);
     appendEvent(taskDir(id), "orphan_detected", undefined, "state=interrupted");
+    releaseLockForTask(status.session, id);
     fail(`task ${id}: process ${deadPid ?? "(none)"} not running, marked interrupted`);
   }
 
@@ -1624,6 +1851,7 @@ async function cmdCancel(pos) {
   }
   writeStatus(id, status);
   appendEvent(taskDir(id), "cancel_forced", undefined, "SIGKILL");
+  releaseLockForTask(status.session, id);
   process.stdout.write(`CANCELLED ${id} state=cancelled (forced)\n`);
 }
 

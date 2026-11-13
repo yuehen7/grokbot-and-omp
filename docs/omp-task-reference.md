@@ -169,12 +169,27 @@ Example status:
 ```
 
 `session_file` and `omp_session_id` are filled from the OMP `get_state` RPC
-response after the first spawn. `reply` / `approve` / `deny` resume with
-`--resume`, preferring an existing `session_file` and falling back to
-`omp_session_id` (OMP accepts a path or id/prefix). If the file is gone a
-`session_missing` event is recorded; if neither target is usable the command
-**fails hard** instead of silently starting a cold session that would lose
-context.
+response after the first spawn. At task end GAO verifies that the session file
+actually exists; a local/slash turn (which never writes one) clears both fields
+and records `session_cleared`, so later follow-ups do not chase a phantom path.
+
+`reply` / `approve` / `deny` resume with `--resume <file>`. If the recorded path
+was moved, GAO searches `OMP_TASK_SESSION_DIR` for a `*.jsonl` filename
+containing `omp_session_id`. A bare id is not passed to `--resume` because OMP
+resolves ids by scanning session files; a missing file would otherwise fail at
+spawn time with a confusing error. If no file can be found, the command **fails
+hard** before changing state. `approve` / `deny` also defer writing
+`approved.json` / the denied event until OMP accepts the follow-up prompt, so a
+failed spawn cannot whitelist a dangerous command or record a denial no agent
+saw.
+
+Concurrent `run`s for the same `--session` are serialized with an atomic lock
+file under `$OMP_TASK_DIR/.locks/<session>.lock` (`O_CREAT|O_EXCL`). Task IDs
+are claimed with `mkdir` of the task directory so two processes in the same
+second cannot share one ID.
+
+When a turn produces no assistant text, `result.md` is removed rather than left
+over from the previous turn.
 
 Reply reuses options from the first run. Storage timestamps are ISO UTC;
 displayed timestamps and ID generation use the host process's local timezone.
@@ -217,7 +232,7 @@ The task runner speaks OMP's native RPC mode. The relevant contract:
 | Start | `spawn(OMP_BIN \|\| "omp", ["--mode","rpc", ...])`, cwd = task cwd |
 | Ready | Waits for the first `{"type":"ready",...}` frame |
 | Protocol | Sends `negotiate_protocol` v2 when advertised; reassembles `rpc_chunk` frames; falls back to v1 |
-| Session | Fresh run uses `--session-dir $OMP_TASK_SESSION_DIR`; follow-ups use `--resume <session_file\|omp_session_id>` |
+| Session | Fresh run uses `--session-dir $OMP_TASK_SESSION_DIR`; follow-ups use `--resume <session_file>` |
 | Prompt | `{"id","type":"prompt","message":"..."}` |
 | Completion | `prompt_result` keyed by prompt id; `agentInvoked:false` finishes local/slash turns; `agent_end` with `isTerminal !== false` is a watchdog; agent turns require assistant text (or fail) |
 | Abort | `{"type":"abort"}`; waits up to 5s for the outcome |
@@ -247,9 +262,11 @@ safety net.
 
 ## Preflight
 
-If `OMP_TASK_PREFLIGHT` points to an executable, or an executable `omp-preflight`
-sits beside `omp-task`, it runs synchronously before `run`/`reply`/`approve`/
-`deny` spawns OMP. A non-zero exit is logged but does not block the task.
+If `OMP_TASK_PREFLIGHT` is set, or an `omp-preflight` beside `omp-task` is found,
+it runs synchronously before `run`/`reply`/`approve`/`deny` when executable
+(`chmod +x`). A non-executable candidate is skipped with a `preflight` event
+(`skipped: not executable <path>`) rather than failing silently. A non-zero exit
+from an executable preflight is logged but does not block the task.
 
 When OMP emits `auto_retry_start` for a connection-class error (`UND_ERR_SOCKET`,
 `socket`, `other side closed`, `ECONNRESET`, `ETIMEDOUT`, `fetch failed`,
@@ -296,9 +313,11 @@ task's `approvals.jsonl` and returns:
 ```
 
 `omp-task` polls `approvals.jsonl` every 200ms and POSTs the `needs_approval`
-notification. `approve` writes the exact command to `approved.json` and resumes
-the session with a release message; the guard then allows that exact string on
-its next execution. `deny` resumes with a refusal message and does not whitelist
+notification. `approve` resumes with a release message and writes the exact
+command to `approved.json` only after OMP accepts that prompt (so a failed
+spawn cannot leave a whitelist without a delivered release). The guard then
+allows that exact string on its next execution. `deny` likewise records the
+denial event only after the refusal prompt is accepted, and does not whitelist
 anything.
 
 See [security.md](security.md) for the rule set and limitations.

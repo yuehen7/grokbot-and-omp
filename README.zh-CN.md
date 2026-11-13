@@ -157,9 +157,9 @@ Grok Bot 派活时编写的任务书应当越精炼越好，包含五个关键�
 - **宿主机睡眠与重启自动恢复**：
   Bot 所在电脑空闲时容易休眠，休眠会冻住 OMP。通过在派发轮次中保持阻塞等待（`AwaitShell`），可确保任务连贯执行不被休眠打断。若机器被突发重启打断，`omp-task status` 能自动识别孤儿进程并标记为 `interrupted`。Bot 仅需运行 `omp-task cancel <ID>` 清理旧状态，再用 `omp-task reply <ID> '电脑刚才重启了，请接着做剩下的工作…' --owner <BOT_ID>` 即可在原 OMP 会话中无缝续跑。
 - **会话续跑**：
-  新任务在 `~/.omp/agent/sessions/tasks`（可用 `OMP_TASK_SESSION_DIR` 覆盖）下创建 OMP 会话。`omp-task` 通过 RPC `get_state` 记录 `session_file`，`reply`/`approve`/`deny` 用 `--resume` 恢复同一会话，保留上下文。
+  新任务在 `~/.omp/agent/sessions/tasks`（可用 `OMP_TASK_SESSION_DIR` 覆盖）下创建 OMP 会话。`omp-task` 通过 RPC `get_state` 记录 `session_file`，`reply`/`approve`/`deny` 用 `--resume` 恢复同一会话，保留上下文。若路径已移动，会按 session id 在 `OMP_TASK_SESSION_DIR` 中查找；找不到会话文件时续跑会硬失败，避免静默丢失上下文。
 - **模型链路预检（`omp-preflight`）**：
-  电脑刚从睡眠唤醒时，虚拟网卡与转发链路（如 Tailscale）可能处于假死状态：本地端口看似可连，但 HTTP 请求挂起并在 2 分钟后报 `UND_ERR_SOCKET`。将 `bin/omp-preflight.example` 复制到 `~/tools/omp-call/omp-preflight` 并配好健康探测接口，`omp-task` 会在 `run`、`reply`、`approve`、`deny` 执行前自动执行预检，若链路不通则自动重启网络并等待就绪。OMP 遇到连接报错自动重试时也会并行拉起预检。
+  电脑刚从睡眠唤醒时，虚拟网卡与转发链路（如 Tailscale）可能处于假死状态：本地端口看似可连，但 HTTP 请求挂起并在 2 分钟后报 `UND_ERR_SOCKET`。将 `bin/omp-preflight.example` 复制到 `~/tools/omp-call/omp-preflight`、`chmod +x` 并配好健康探测接口，`omp-task` 会在 `run`、`reply`、`approve`、`deny` 执行前自动执行预检，若链路不通则自动重启网络并等待就绪。OMP 遇到连接报错自动重试时也会并行拉起预检。
 - **空闲超时熔断（`idle-timeout`）**：
   若 OMP 持续 300 秒（可通过 `--idle-timeout <秒数>` 或环境变量 `OMP_TASK_IDLE_TIMEOUT` 配置）未产生任何新的 RPC 事件，`omp-task` 会自动将其判为 `failed`（标记原因 `idle timeout`）并照常发送通知，防止任务因后端死锁无限期挂死。
 - **多模型与额度灵活调度**：

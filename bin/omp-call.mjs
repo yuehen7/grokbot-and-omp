@@ -205,6 +205,27 @@ function pushFrame(rec) {
   return JSON.parse(text);
 }
 
+// Local/slash prompts often produce command_output instead of assistant text.
+// Empty text is acceptable there, but an error without output is not.
+function finishLocal() {
+  if (done) return;
+  if (lastError && !lastText) finish(1);
+  else finish(0);
+}
+
+// One completion rule for agent turns and prompt_result/session_settled.
+function finishCompleted() {
+  if (done) return;
+  if (localPrompt) return finishLocal();
+  // Match omp-task / GAP: require assistant text for a successful agent turn.
+  if (lastError && !lastText) return finish(1);
+  if (!lastText) {
+    lastError ||= "no assistant text";
+    return finish(1);
+  }
+  return finish(0);
+}
+
 function maybeFinish() {
   if (done) return;
   if (promptResult?.status === "error") {
@@ -217,24 +238,7 @@ function maybeFinish() {
     finish(130);
     return;
   }
-  if (promptResult?.status === "completed") {
-    if (localPrompt) {
-      finish(lastError && !lastText ? 1 : 0);
-      return;
-    }
-    // Match omp-task / GAP: require assistant text for a successful agent turn.
-    if (lastError && !lastText) finish(1);
-    else if (!lastText) {
-      lastError ||= "no assistant text";
-      finish(1);
-    } else finish(0);
-  }
-}
-
-function finishLocalPrompt() {
-  if (done) return;
-  if (lastError && !lastText) finish(1);
-  else finish(0);
+  if (promptResult?.status === "completed") finishCompleted();
 }
 
 let buf = Buffer.alloc(0);
@@ -297,7 +301,7 @@ child.stdout.on("data", (chunk) => {
           if (!localTimer) {
             localTimer = setTimeout(() => {
               if (done || promptResult) return;
-              finishLocalPrompt();
+              finishLocal();
             }, 500);
             localTimer.unref?.();
           }
@@ -352,12 +356,7 @@ child.stdout.on("data", (chunk) => {
     if (r.type === "agent_end" && r.isTerminal !== false && !promptResult) {
       setTimeout(() => {
         if (done || promptResult) return;
-        if (localPrompt) finishLocalPrompt();
-        else if (lastError && !lastText) finish(1);
-        else if (!lastText) {
-          lastError ||= "no assistant text";
-          finish(1);
-        } else finish(0);
+        finishCompleted();
       }, 2500).unref();
     }
   }

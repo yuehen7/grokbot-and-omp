@@ -288,18 +288,20 @@ timeout, 130 cancelled. See the reference for storage and recovery details.
 - **Missing tasks**: a test `OMP_TASK_DIR` may still be set. `unset OMP_TASK_DIR`
   returns to `~/.omp/tasks`; do not discard the alternative store's results.
 - **Session not resuming**: inspect `session_file` / `omp_session_id` in
-  `status.json`. Follow-ups prefer `--resume` on the session file, then fall
-  back to the session id. If the file is gone a `session_missing` event is
-  recorded; if neither target is usable, `reply`/`approve`/`deny` **fail hard**
-  instead of silently starting a cold session. Start a new `--session` only when
-  you intentionally abandon the old context.
+  `status.json`. Follow-ups require a real session file: GAO uses the recorded
+  path, or searches `OMP_TASK_SESSION_DIR` for the session id. A bare id is not
+  enough because OMP resolves ids by scanning files. If no file is found,
+  `reply`/`approve`/`deny` **fail hard** (and approval side effects are not
+  applied) instead of silently starting a cold session. Start a new `--session`
+  only when you intentionally abandon the old context.
 - **Rotated webhook key**: update `<BOT>_OMP_NOTIFY_KEY` via secure input and
   repeat an explicitly authorized smoke test.
 - **No notification**: inspect `notify` events and `pending`; do not
   automatically rerun.
-- **Occupied session**: only one `running` or `queued` task per session is
-  allowed. Check `status`, `cancel` if appropriate, or choose a different
-  session.
+- **Occupied session**: only one active task per session is allowed. Status
+  (`running`/`queued`) is an advisory check; the real mutex is an atomic lock
+  under `~/.omp/tasks/.locks/<session>.lock`. Check `status`, `cancel` if
+  appropriate, or choose a different session.
 - **Timeout / idle timeout**: split work or increase `--timeout` /
   `--idle-timeout`. Failed work needs a verified reason and user approval before
   retrying; avoid repeated empty calls.
