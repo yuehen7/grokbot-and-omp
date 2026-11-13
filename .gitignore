@@ -1,0 +1,46 @@
+# Dependencies
+node_modules/
+
+# Logs
+*.log
+npm-debug.log*
+yarn-debug.log*
+yarn-error.log*
+pnpm-debug.log*
+
+# Environment / secrets
+.env
+.env.*
+!.env.example
+*.secret
+
+# Local task / session stores (must never be committed)
+.omp/
+.pi/
+tasks/
+sessions/
+
+# Reference project (GAP blueprint; kept locally, not part of GAO)
+grokbot-and-pi/
+
+# Build output / coverage
+dist/
+build/
+coverage/
+*.tsbuildinfo
+
+# Test and runtime artifacts
+test-results/
+tmp/
+.tmp/
+
+# Editor / IDE
+.idea/
+.vscode/
+*.swp
+*.swo
+*~
+
+# OS metadata
+.DS_Store
+Thumbs.db

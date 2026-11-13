@@ -1,0 +1,16 @@
+#!/usr/bin/env bash
+# Default OMP call: write/exec tools + high thinking + OMP's configured default
+# model (or OMP_RUN_MODEL).
+# Usage: omp-run <cwd> "<prompt>" [--model provider/model] [--session-dir dir] [--timeout sec] [--verbose]
+here="$(cd "$(dirname "$0")" && pwd)"
+export PATH="$HOME/.local/bin:$HOME/.bun/bin:$HOME/.omp/agent/bin:$PATH"
+if [ "$#" -lt 2 ]; then
+  echo 'usage: omp-run <cwd> "<prompt>" [--model provider/model] [--session-dir dir] [--timeout sec] [--verbose]' >&2
+  exit 2
+fi
+dir="$1"; shift; prompt="$1"; shift
+model_args=()
+if [ -n "${OMP_RUN_MODEL:-}" ]; then
+  model_args=(--model "$OMP_RUN_MODEL")
+fi
+exec "$here/omp-call.mjs" "$dir" "$prompt" "${model_args[@]}" --allow-write --thinking high "$@"

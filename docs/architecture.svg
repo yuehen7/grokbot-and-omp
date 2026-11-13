@@ -1,0 +1,88 @@
+<svg xmlns="http://www.w3.org/2000/svg" width="1600" height="900" viewBox="0 0 1600 900">
+  <defs>
+    <style>
+      .bg { fill: #f7f9fc; }
+      .box { fill: #ffffff; stroke: #2b6cb0; stroke-width: 3; rx: 18; }
+      .box2 { fill: #fffaf0; stroke: #dd6b20; stroke-width: 3; rx: 18; }
+      .box3 { fill: #f0fff4; stroke: #2f855a; stroke-width: 3; rx: 18; }
+      .t { font-family: -apple-system, "Helvetica Neue", Arial, sans-serif; fill: #1a202c; }
+      .h { font-size: 34px; font-weight: 700; }
+      .m { font-size: 24px; font-weight: 600; }
+      .s { font-size: 19px; fill: #4a5568; }
+      .arrow { stroke: #2b6cb0; stroke-width: 4; fill: none; marker-end: url(#arrow); }
+      .dash { stroke: #dd6b20; stroke-width: 4; fill: none; stroke-dasharray: 12 10; marker-end: url(#arrow2); }
+    </style>
+    <marker id="arrow" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto">
+      <path d="M 0 0 L 10 5 L 0 10 z" fill="#2b6cb0"/>
+    </marker>
+    <marker id="arrow2" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto">
+      <path d="M 0 0 L 10 5 L 0 10 z" fill="#dd6b20"/>
+    </marker>
+  </defs>
+
+  <rect class="bg" x="0" y="0" width="1600" height="900"/>
+
+  <text class="t h" x="70" y="70">GAO — Grokbot And Omp</text>
+
+  <rect class="box" x="60" y="120" width="1480" height="560" rx="24" fill="#eef6ff" stroke="#90cdf4"/>
+  <text class="t m" x="90" y="165">Bot computer (same machine)</text>
+
+  <rect class="box" x="100" y="210" width="300" height="150"/>
+  <text class="t m" x="130" y="265">Grok Bot</text>
+  <text class="t s" x="130" y="305">plan + verify</text>
+  <text class="t s" x="130" y="335">never does heavy edits</text>
+
+  <rect class="box2" x="480" y="210" width="330" height="150"/>
+  <text class="t m" x="510" y="265">omp-task</text>
+  <text class="t s" x="510" y="305">owner / pending / ack</text>
+  <text class="t s" x="510" y="335">idle timeout / resume</text>
+
+  <rect class="box3" x="900" y="210" width="300" height="150"/>
+  <text class="t m" x="930" y="265">OMP</text>
+  <text class="t s" x="930" y="305">omp --mode rpc</text>
+  <text class="t s" x="930" y="335">reads, edits, runs tests</text>
+
+  <rect class="box" x="1260" y="210" width="240" height="150"/>
+  <text class="t m" x="1290" y="265">Model</text>
+  <text class="t s" x="1290" y="305">API key / OAuth</text>
+  <text class="t s" x="1290" y="335">relay / gateway</text>
+
+  <rect class="box2" x="480" y="440" width="330" height="140"/>
+  <text class="t m" x="510" y="495">omp-preflight</text>
+  <text class="t s" x="510" y="535">probe before spawn</text>
+  <text class="t s" x="510" y="565">reconnect after sleep</text>
+
+  <rect class="box3" x="900" y="440" width="300" height="140"/>
+  <text class="t m" x="930" y="495">omp-guard</text>
+  <text class="t s" x="930" y="535">tool_call hook</text>
+  <text class="t s" x="930" y="565">approvals.jsonl</text>
+
+  <rect class="box" x="1260" y="440" width="240" height="140"/>
+  <text class="t m" x="1290" y="495">~/.omp/tasks/ID</text>
+  <text class="t s" x="1290" y="535">status / events</text>
+  <text class="t s" x="1290" y="565">result / approvals</text>
+
+  <rect class="box" x="100" y="440" width="300" height="140"/>
+  <text class="t m" x="130" y="495">User</text>
+  <text class="t s" x="130" y="535">approves dangerous</text>
+  <text class="t s" x="130" y="565">commands only</text>
+
+  <rect class="box2" x="480" y="660" width="720" height="120"/>
+  <text class="t m" x="510" y="715">Webhook routine (fallback wakeup)</text>
+  <text class="t s" x="510" y="750">done / failed / needs_approval — metadata only</text>
+
+  <!-- arrows -->
+  <path class="arrow" d="M 400 285 L 470 285"/>
+  <path class="arrow" d="M 810 285 L 890 285"/>
+  <path class="arrow" d="M 1200 285 L 1250 285"/>
+  <path class="arrow" d="M 630 440 L 630 370"/>
+  <path class="arrow" d="M 1050 440 L 1050 370"/>
+  <path class="arrow" d="M 1260 510 L 1210 510"/>
+  <path class="arrow" d="M 900 510 L 820 510"/>
+  <path class="arrow" d="M 480 510 L 410 510"/>
+  <path class="dash" d="M 700 360 C 700 620 560 640 560 650"/>
+  <path class="dash" d="M 1200 650 C 1300 620 1200 590 1200 590"/>
+  <path class="dash" d="M 480 720 C 350 720 250 640 250 590"/>
+
+  <text class="t s" x="480" y="830">Disk is the source of truth. Webhooks only reduce wakeup latency.</text>
+</svg>

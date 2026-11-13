@@ -1,0 +1,15 @@
+#!/usr/bin/env bash
+# Tracked OMP tasks: run/reply/approve/deny/status/list/log/cancel/pending/ack;
+# data in ~/.omp/tasks/.
+here="$(cd "$(dirname "$0")" && pwd)"
+export PATH="$HOME/.local/bin:$HOME/.bun/bin:$HOME/.omp/agent/bin:$PATH"
+# Optional model-path preflight (copy bin/omp-preflight.example to bin/omp-preflight):
+# runs inside omp-task before run/reply/approve/deny spawns OMP, and again in
+# parallel when OMP auto-retries a connection error such as UND_ERR_SOCKET.
+if [ -z "${OMP_TASK_PREFLIGHT:-}" ] && [ -x "$here/omp-preflight" ]; then
+  OMP_TASK_PREFLIGHT="$here/omp-preflight"
+fi
+if [ -n "${OMP_TASK_PREFLIGHT:-}" ]; then
+  export OMP_TASK_PREFLIGHT
+fi
+exec "$here/omp-task.mjs" "$@"
